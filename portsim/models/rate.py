@@ -1,32 +1,60 @@
 import numpy as np
-from enum import Enum
-from pydantic import BaseModel
 from scipy.stats import truncnorm
-from typing import Optional, Literal, Callable
+from typing import Optional, Callable
+from pydantic import BaseModel, Field, PrivateAttr
 
 
-InvestmentFrequency = Literal["monthly", "quarterly", "yearly"]
-
-
-class RateType(Enum):
-    CONSTANT = "constant"
-    RANDOM = "random"
-    GAUSSIAN = "gaussian"
-    GAUSSIAN_CENTERED = "gaussian_centered"
-    CUSTOM = "custom"
+from portsim.enums.rate import RateType
+from portsim.enums.investment import InvestmentFrequency
 
 
 class RateParameters(BaseModel):
     # TODO: Write val method for overlapping types
-    rate_type: RateType
-    constant: Optional[float] = None
-    mean: Optional[float] = None
-    std_dev: Optional[float] = None
-    bias: Optional[float] = 0
-    minimum: Optional[float] = -0.4
-    maximum: Optional[float] = 0.4
-    pos_prob: Optional[float] = 0.65
-    level: InvestmentFrequency
+    rate_type: RateType = Field(
+        description="Defines the function the rate will follow for the given time period"
+    )
+    constant: float = Field(
+        default=None, description="Constant rate of the provided value"
+    )
+    mean: float = Field(
+        default=None,
+        description="""
+        Mean of the Gaussian distribution describing the rate.
+        Only applicable when rate_type is either one of 
+        RateType.GAUSSIAN or RateType.GAUSSIAN_CENTERED
+        """
+    )
+    std_dev: float = Field(
+        default=None, description="""
+        Standard Deviation of the gaussian distribution
+        describing the rate. Only applicable when rate_type
+        is either one of RateType.GAUSSIAN or RateType.GAUSSIAN_CENTERED
+        """
+    )
+    minimum: float = Field(
+        default=None, le=0, ge=-1,
+        description="Minimum modeled loss"
+    )
+    maximum: float = Field(
+        default=None, le=1, ge=0,
+        description="Maximum modeled profit"
+    )
+    pos_prob: float = Field(
+        default=None,
+        description="""
+        Probability of gaussian noise positively biasing the constant value.
+        Only applicable when rate_type == RateType.GAUSSIAN_CENTERED
+        """
+    )
+    _every: InvestmentFrequency = PrivateAttr(default=None)
+
+    @property
+    def every(self):
+        return self._every
+
+    @every.setter
+    def every(self, value):
+        self._every = value
 
 
 class Rate:
@@ -37,8 +65,9 @@ class Rate:
         self.time_period: Optional[int] = None
         self._index = 0
 
-    def generate(self, time_period: int):
+    def generate(self, time_period: int, investment_frq: InvestmentFrequency):
         self.time_period = time_period
+        self.rate_params.every = investment_frq
         RateReturnType = Callable[[RateParameters], list[float] | None]
         rate_map: dict[str, RateReturnType] = {
             "constant": self.constant,
@@ -55,17 +84,16 @@ class Rate:
             "quarterly": 4,
             "yearly": 1
         }
-        return inv_freq_map.get(investment_freq)
+        return inv_freq_map.get(investment_freq.value)
 
     def constant(self, params: RateParameters):
-        inv_freq = self.investment_freq(params.level)
+        inv_freq = self.investment_freq(params.every)
         adjusted_time_period = self.time_period * inv_freq
         self.rate_yoy = [params.constant] * adjusted_time_period
         return self.rate_yoy
 
     def random(self, params: RateParameters):
         self.rate_yoy = np.random.rand(self.time_period).tolist()
-        self.rate_yoy = [params.bias + r for r in self.rate_yoy]
         return self.rate_yoy
 
     def gaussian(self, params: RateParameters):
